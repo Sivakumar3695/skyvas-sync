@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Skyvas Sync
+Comment=Desktop photo sync tool for Skyvas events
+Exec=SkyvasSync
+Icon=skyvassync
+Terminal=false
+Categories=Utility;Graphics;
+StartupWMClass=skyvassync

@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skyvas-sync"
+version = "1.0.0"
+description = "Desktop photo sync tool for Skyvas events"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6>=6.6.0",
+    "requests>=2.31.0",
+    "Pillow>=10.0.0",
+]
+
+[project.scripts]
+skyvas-sync = "skyvas_sync.main:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "pytest-qt>=4.2.0",
+    "pytest-mock>=3.12.0",
+    "responses>=0.24.0",
+    "freezegun>=1.2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+qt_api = "pyside6"
+addopts = "--cov=skyvas_sync --cov-report=term-missing --cov-report=html -v"
+
+[tool.coverage.run]
+source = ["skyvas_sync"]
+omit = ["*/main.py"]
+concurrency = ["thread"]
+
+[tool.coverage.report]
+fail_under = 95
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__",
+    "if TYPE_CHECKING",
+]
