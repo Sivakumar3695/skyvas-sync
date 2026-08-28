@@ -83,60 +83,6 @@ class TestMainWindowUploadStatus:
             mock.assert_called_once_with(status)
 
 
-class TestMainWindowTabChange:
-    def test_album_tab_loads_folders(self, window_logged_in: MainWindow, sample_event: Event, image_folder: Path):
-        window_logged_in._go_detail(sample_event)
-        window_logged_in._uploader_view._folders = [image_folder]
-
-        with patch.object(window_logged_in._album_view, "set_folders") as mock:
-            window_logged_in._on_tab_changed(1)
-            mock.assert_called_once_with([image_folder])
-
-    def test_album_tab_no_folder(self, window_logged_in: MainWindow, sample_event: Event):
-        window_logged_in._go_detail(sample_event)
-        window_logged_in._uploader_view._folders = []
-        window_logged_in._uploader_view._instant_sync_folder = None
-
-        with patch.object(window_logged_in._album_view, "set_folders") as mock:
-            window_logged_in._on_tab_changed(1)
-            mock.assert_not_called()
-
-    def test_upload_tab_does_nothing(self, window_logged_in: MainWindow, sample_event: Event):
-        window_logged_in._go_detail(sample_event)
-        with patch.object(window_logged_in._album_view, "set_folders") as mock:
-            window_logged_in._on_tab_changed(0)
-            mock.assert_not_called()
-
-    def test_album_tab_includes_instant_sync_folder(
-        self, window_logged_in: MainWindow, sample_event: Event, image_folder: Path, tmp_path: Path,
-    ):
-        window_logged_in._go_detail(sample_event)
-        window_logged_in._uploader_view._folders = [image_folder]
-        sync_dir = tmp_path / "sync_album"
-        sync_dir.mkdir()
-        window_logged_in._uploader_view._instant_sync_folder = sync_dir
-
-        with patch.object(window_logged_in._album_view, "set_folders") as mock:
-            window_logged_in._on_tab_changed(1)
-            mock.assert_called_once()
-            folders = mock.call_args[0][0]
-            assert image_folder in folders
-            assert sync_dir in folders
-
-    def test_album_tab_only_instant_sync_folder(
-        self, window_logged_in: MainWindow, sample_event: Event, tmp_path: Path,
-    ):
-        window_logged_in._go_detail(sample_event)
-        window_logged_in._uploader_view._folders = []
-        sync_dir = tmp_path / "only_sync"
-        sync_dir.mkdir()
-        window_logged_in._uploader_view._instant_sync_folder = sync_dir
-
-        with patch.object(window_logged_in._album_view, "set_folders") as mock:
-            window_logged_in._on_tab_changed(1)
-            mock.assert_called_once_with([sync_dir])
-
-
 class TestMainWindowLoginSuccess:
     def test_login_navigates_to_events(self, window_logged_out: MainWindow, mock_api: MagicMock):
         window_logged_out._login_view.login_success.emit()

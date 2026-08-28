@@ -1,0 +1,138 @@
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_env:
+        description: Environment to bake into the binary
+        type: choice
+        options: [staging, production]
+        default: staging
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            os: ubuntu-latest
+            arch: x86_64
+          - platform: windows
+            os: windows-latest
+            arch: x86_64
+          - platform: macos
+            os: macos-latest
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # Which environment gets baked into the binary:
+      #   manual run     -> whatever target_env the operator picked
+      #   pull request   -> staging
+      #   master / v* tag -> production
+      - name: Resolve target environment
+        id: cfg
+        shell: bash
+        run: |
+          case "${{ github.event_name }}" in
+            workflow_dispatch) TARGET="${{ inputs.target_env }}" ;;
+            pull_request)      TARGET="staging" ;;
+            *)                 TARGET="production" ;;
+          esac
+          echo "Event=${{ github.event_name }} ref=${{ github.ref_name }} -> env=$TARGET"
+          echo "env=$TARGET" >> "$GITHUB_OUTPUT"
+
+      # PyInstaller is not in the project's dev extras, so the build scripts
+      # assume it is already on PATH.
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pip "pyinstaller==6.19.0"
+
+      - name: Build (Linux / macOS)
+        if: matrix.platform != 'windows'
+        run: bash scripts/build_all.sh "${{ steps.cfg.outputs.env }}"
+
+      - name: Build (Windows)
+        if: matrix.platform == 'windows'
+        shell: cmd
+        run: |
+          python -VV
+          python -m PyInstaller --version
+          call scripts\build_windows.bat ${{ steps.cfg.outputs.env }}
+          if errorlevel 1 exit /b 1
+
+      # upload-artifact drops the executable bit and .app symlinks, so archive
+      # anything that needs to stay runnable.
+      - name: Package
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENV="${{ steps.cfg.outputs.env }}"
+          BASE="SkyvasSync-${{ matrix.platform }}-${{ matrix.arch }}-${ENV}"
+          mkdir -p release
+          case "${{ matrix.platform }}" in
+            linux)
+              tar -czf "release/${BASE}.tar.gz" -C "dist/${ENV}" SkyvasSync
+              ;;
+            macos)
+              if [ -d "dist/${ENV}/SkyvasSync.app" ]; then
+                ditto -c -k --keepParent "dist/${ENV}/SkyvasSync.app" "release/${BASE}.zip"
+              else
+                tar -czf "release/${BASE}.tar.gz" -C "dist/${ENV}" SkyvasSync
+              fi
+              ;;
+            windows)
+              cp "dist/${ENV}/SkyvasSync.exe" "release/${BASE}.exe"
+              ;;
+          esac
+          echo "name=${BASE}" >> "$GITHUB_OUTPUT"
+          ls -lh release/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            release/*

@@ -39,9 +39,9 @@ STAGING = Config(
 )
 
 PRODUCTION = Config(
-    cognito_domain="muga400.auth.ap-south-1.amazoncognito.com",
-    client_id="49rg8en6nkl5ui4f1molibo8ki",
-    user_pool_id="ap-south-1_7KBQJW7fL",
+    cognito_domain="auth.skyvas.in",
+    client_id="4noo4ivgdhtgtrl9krem3pt36g",
+    user_pool_id="ap-south-1_IxN9WNpDb",
     region="ap-south-1",
     api_base_url="https://muga400.skyvas.in/api/v1",
 )

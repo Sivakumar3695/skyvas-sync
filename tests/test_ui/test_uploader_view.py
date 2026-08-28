@@ -7,11 +7,30 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from PIL import Image
+from PySide6.QtWidgets import QDialog
 
 from skyvas_sync.api.client import ApiClient
 from skyvas_sync.api.models import Event, UploadStatus
 from skyvas_sync.settings_store import SettingsStore
+from skyvas_sync.ui.folder_dialog import AsyncFolderDialog
 from skyvas_sync.ui.uploader_view import UploaderView
+
+
+def _mock_folder_dialog(folder: str | None):
+    """Return a context manager that patches ``_make_folder_dialog``.
+
+    When *folder* is a non-empty string the mock dialog returns ``Accepted``
+    and reports the path as the selected folder.  When *folder* is ``None``
+    or empty the dialog returns ``Rejected``.
+    """
+    dlg = MagicMock(spec=AsyncFolderDialog)
+    if folder:
+        dlg.exec.return_value = QDialog.DialogCode.Accepted
+        dlg.selected_path.return_value = Path(folder)
+    else:
+        dlg.exec.return_value = QDialog.DialogCode.Rejected
+        dlg.selected_path.return_value = None
+    return patch.object(UploaderView, "_make_folder_dialog", return_value=dlg)
 
 
 @pytest.fixture()
@@ -53,11 +72,31 @@ class TestUploaderViewInit:
         assert not uploader_view._no_folder_label.isHidden()
         assert not uploader_view._start_btn.isEnabled()
 
+    def test_set_event_locked_when_status_gte_2(self, uploader_view: UploaderView):
+        locked_event = Event(
+            id="evt-2", name="Done Event", place="Hall", date="09/Mar/2026",
+            event_type="WEDDING", status_code=2,
+        )
+        uploader_view.set_event(locked_event)
+        assert not uploader_view._browse_btn.isEnabled()
+        assert not uploader_view._start_btn.isEnabled()
+        assert not uploader_view._locked_label.isHidden()
+        assert "Photo Uploaded" in uploader_view._locked_label.text()
+
+    def test_set_event_unlocked_when_status_lt_2(self, uploader_view: UploaderView, image_folder: Path):
+        unlocked_event = Event(
+            id="evt-3", name="Active Event", place="Hall", date="09/Mar/2026",
+            event_type="WEDDING", status_code=1,
+        )
+        uploader_view.set_event(unlocked_event)
+        assert uploader_view._browse_btn.isEnabled()
+        assert uploader_view._locked_label.isHidden()
+
 
 class TestUploaderViewBrowse:
     def test_browse_selects_folder(self, qtbot, uploader_view: UploaderView, image_folder: Path, event: Event):
         uploader_view.set_event(event)
-        with patch("skyvas_sync.ui.uploader_view.QFileDialog.getExistingDirectory", return_value=str(image_folder)):
+        with _mock_folder_dialog(str(image_folder)):
             uploader_view._on_browse()
         assert image_folder in uploader_view._folders
         assert "3 image(s)" in uploader_view._count_label.text()
@@ -65,7 +104,7 @@ class TestUploaderViewBrowse:
 
     def test_browse_cancelled(self, uploader_view: UploaderView, event: Event):
         uploader_view.set_event(event)
-        with patch("skyvas_sync.ui.uploader_view.QFileDialog.getExistingDirectory", return_value=""):
+        with _mock_folder_dialog(None):
             uploader_view._on_browse()
         assert uploader_view._folders == []
         assert not uploader_view._start_btn.isEnabled()
@@ -74,7 +113,7 @@ class TestUploaderViewBrowse:
         empty = tmp_path / "empty"
         empty.mkdir()
         uploader_view.set_event(event)
-        with patch("skyvas_sync.ui.uploader_view.QFileDialog.getExistingDirectory", return_value=str(empty)):
+        with _mock_folder_dialog(str(empty)):
             uploader_view._on_browse()
         assert "0 image(s)" in uploader_view._count_label.text()
         assert not uploader_view._start_btn.isEnabled()
@@ -161,7 +200,9 @@ class TestUploaderViewProgress:
 
         uploader_view._on_progress(5, 20, "photo.jpg")
         assert uploader_view._progress_bar.value() == 25
-        assert "photo.jpg" in uploader_view._current_file.text()
+        label = uploader_view._current_file.text()
+        assert "photo.jpg" in label
+        assert "5 / 20" in label
         assert len(status_updates) == 1
 
     def test_on_progress_zero_total(self, uploader_view: UploaderView, event: Event):
@@ -172,7 +213,7 @@ class TestUploaderViewProgress:
     def test_on_progress_empty_current(self, uploader_view: UploaderView, event: Event):
         uploader_view.set_event(event)
         uploader_view._on_progress(10, 10, "")
-        assert uploader_view._current_file.text() == ""
+        assert "10 / 10" in uploader_view._current_file.text()
 
 
 class TestUploaderViewCallbacks:
@@ -309,9 +350,6 @@ class TestUploaderViewInstantSyncInit:
         assert not uploader_view._sync_clear_btn.isEnabled()
         assert uploader_view._sync_status.text() == ""
 
-    def test_all_folders_empty(self, uploader_view: UploaderView):
-        assert uploader_view.all_folders == []
-
     def test_instant_sync_folder_property_none(self, uploader_view: UploaderView):
         assert uploader_view.instant_sync_folder is None
 
@@ -322,7 +360,7 @@ class TestUploaderViewInstantSyncBrowse:
         sync_dir.mkdir()
         uploader_view.set_event(event)
 
-        with patch("skyvas_sync.ui.uploader_view.QFileDialog.getExistingDirectory", return_value=str(sync_dir)):
+        with _mock_folder_dialog(str(sync_dir)):
             with patch("skyvas_sync.ui.uploader_view.InstantSyncManager") as MockSync:
                 instance = MockSync.return_value
                 instance.file_uploaded = MagicMock()
@@ -345,7 +383,7 @@ class TestUploaderViewInstantSyncBrowse:
 
     def test_browse_cancelled(self, uploader_view: UploaderView, event: Event):
         uploader_view.set_event(event)
-        with patch("skyvas_sync.ui.uploader_view.QFileDialog.getExistingDirectory", return_value=""):
+        with _mock_folder_dialog(None):
             uploader_view._on_sync_browse()
         assert uploader_view._instant_sync is None
 
@@ -355,37 +393,6 @@ class TestUploaderViewInstantSyncBrowse:
         # No event set → _start_instant_sync returns early
         uploader_view._start_instant_sync(sync_dir)
         assert uploader_view._instant_sync is None
-
-
-class TestUploaderViewInstantSyncAllFolders:
-    def test_all_folders_with_sync(self, uploader_view: UploaderView, event: Event, image_folder: Path, tmp_path: Path):
-        uploader_view.set_event(event)
-        uploader_view._apply_folder(image_folder)
-
-        sync_dir = tmp_path / "sync"
-        sync_dir.mkdir()
-        uploader_view._instant_sync_folder = sync_dir
-
-        folders = uploader_view.all_folders
-        assert image_folder in folders
-        assert sync_dir in folders
-        assert len(folders) == 2
-
-    def test_all_folders_sync_same_as_upload(self, uploader_view: UploaderView, event: Event, image_folder: Path):
-        """Instant-sync folder already in upload folders should not duplicate."""
-        uploader_view.set_event(event)
-        uploader_view._apply_folder(image_folder)
-        uploader_view._instant_sync_folder = image_folder
-
-        folders = uploader_view.all_folders
-        assert len(folders) == 1
-
-    def test_all_folders_only_sync(self, uploader_view: UploaderView, tmp_path: Path):
-        sync_dir = tmp_path / "only_sync"
-        sync_dir.mkdir()
-        uploader_view._instant_sync_folder = sync_dir
-
-        assert uploader_view.all_folders == [sync_dir]
 
 
 class TestUploaderViewInstantSyncClear:

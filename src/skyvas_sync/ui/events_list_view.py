@@ -49,19 +49,21 @@ class EventsListView(QWidget):
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
-
-        # Header bar
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
         header_layout = QHBoxLayout()
         title = QLabel("Events")
-        title.setStyleSheet("font-size: 18px; font-weight: bold;")
+        title.setStyleSheet("font-size: 22px; font-weight: 700;")
         header_layout.addWidget(title)
         header_layout.addStretch()
 
         self._refresh_btn = QPushButton("Refresh")
+        self._refresh_btn.setProperty("styleClass", "secondary")
         self._refresh_btn.clicked.connect(self.load_events)
         header_layout.addWidget(self._refresh_btn)
 
         self._logout_btn = QPushButton("Logout")
+        self._logout_btn.setObjectName("logoutBtn")
         self._logout_btn.clicked.connect(self.logout_requested.emit)
         header_layout.addWidget(self._logout_btn)
 
@@ -69,7 +71,7 @@ class EventsListView(QWidget):
 
         # Status label
         self._status = QLabel("")
-        self._status.setStyleSheet("color: #888;")
+        self._status.setStyleSheet("color: #6B7280;")
         layout.addWidget(self._status)
 
         # Table

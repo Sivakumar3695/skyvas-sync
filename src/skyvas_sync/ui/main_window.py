@@ -9,7 +9,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QStackedWidget,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -19,7 +18,6 @@ from skyvas_sync.api.models import Event, UploadStatus
 from skyvas_sync.auth.token_store import TokenStore
 from skyvas_sync.config import Config
 from skyvas_sync.settings_store import SettingsStore
-from skyvas_sync.ui.album_view import AlbumView
 from skyvas_sync.ui.events_list_view import EventsListView
 from skyvas_sync.ui.login_view import LoginView
 from skyvas_sync.ui.uploader_view import UploaderView
@@ -63,7 +61,7 @@ class MainWindow(QMainWindow):
         self._events_view.logout_requested.connect(self._logout)
         self._stack.addWidget(self._events_view)
 
-        # View 2: Event detail (uploader + album tabs)
+        # View 2: Event detail (uploader)
         self._detail_widget = self._build_detail_view()
         self._stack.addWidget(self._detail_widget)
 
@@ -78,34 +76,28 @@ class MainWindow(QMainWindow):
     def _build_detail_view(self) -> QWidget:
         container = QWidget()
         layout = QVBoxLayout(container)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(8)
 
         # Header
         header = QHBoxLayout()
         self._back_btn = QPushButton("← Back")
+        self._back_btn.setProperty("styleClass", "secondary")
         self._back_btn.clicked.connect(self._go_back)
         header.addWidget(self._back_btn)
 
         self._event_title = QLabel("")
-        self._event_title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        self._event_title.setStyleSheet("font-size: 20px; font-weight: 700;")
         header.addWidget(self._event_title, stretch=1)
         layout.addLayout(header)
 
         self._event_info = QLabel("")
-        self._event_info.setStyleSheet("color: #666; margin-bottom: 8px;")
+        self._event_info.setStyleSheet("color: #6B7280; margin-bottom: 6px;")
         layout.addWidget(self._event_info)
-
-        # Tabs: Upload / Album
-        self._tabs = QTabWidget()
 
         self._uploader_view = UploaderView(self._api, self._settings)
         self._uploader_view.upload_status_changed.connect(self._on_upload_status)
-        self._tabs.addTab(self._uploader_view, "Upload")
-
-        self._album_view = AlbumView()
-        self._tabs.addTab(self._album_view, "Album")
-        self._tabs.currentChanged.connect(self._on_tab_changed)
-
-        layout.addWidget(self._tabs)
+        layout.addWidget(self._uploader_view)
         return container
 
     # -- navigation ---------------------------------------------------------
@@ -135,11 +127,3 @@ class MainWindow(QMainWindow):
 
     def _on_upload_status(self, status: UploadStatus) -> None:
         self._events_view.update_upload_status(status)
-
-    # -- album tab switching ------------------------------------------------
-
-    def _on_tab_changed(self, index: int) -> None:
-        if index == 1:
-            folders = self._uploader_view.all_folders
-            if folders:
-                self._album_view.set_folders(folders)

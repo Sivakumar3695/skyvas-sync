@@ -8,7 +8,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from skyvas_sync.api.client import ApiClient, ApiError
 from skyvas_sync.upload.watcher import FolderWatcher
-from skyvas_sync.utils.image_utils import get_image_dimensions, get_mime_type
+from skyvas_sync.utils.image_utils import prepare_for_upload
 
 
 class _BatchUploadThread(QThread):
@@ -39,14 +39,16 @@ class _BatchUploadThread(QThread):
             if self._cancelled:
                 break
             try:
-                width, height = get_image_dimensions(path)
-                mime = get_mime_type(path)
+                image = prepare_for_upload(path)
                 url_info = self._api.get_upload_url(
-                    self._event_id, path.name, width, height,
+                    self._event_id, image.filename, image.width, image.height,
                 )
-                file_bytes = path.read_bytes()
                 self._api.upload_to_s3(
-                    url_info.upload_url, file_bytes, mime, width, height,
+                    url_info.upload_url,
+                    image.data,
+                    image.mime_type,
+                    image.width,
+                    image.height,
                 )
                 self.file_done.emit(str(path))
             except Exception as exc:
@@ -70,6 +72,8 @@ class InstantSyncManager(QObject):
     upload_progress = Signal(int, int, str)  # uploaded, total, current_file
     sync_started = Signal()
     sync_stopped = Signal()
+    poll_started = Signal()    # watcher began a poll scan
+    poll_finished = Signal(int)  # watcher finished a poll scan (# new files)
 
     def __init__(
         self,
@@ -130,6 +134,8 @@ class InstantSyncManager(QObject):
         self._queue.clear()
 
         self._watcher.file_found.connect(self._on_new_file)
+        self._watcher.poll_started.connect(self.poll_started)
+        self._watcher.poll_finished.connect(self.poll_finished)
         self._watcher.start()
 
         self.sync_started.emit()
@@ -143,6 +149,14 @@ class InstantSyncManager(QObject):
         self._watcher.stop()
         try:
             self._watcher.file_found.disconnect(self._on_new_file)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            self._watcher.poll_started.disconnect(self.poll_started)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            self._watcher.poll_finished.disconnect(self.poll_finished)
         except (RuntimeError, TypeError):
             pass
 
