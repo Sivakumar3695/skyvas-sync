@@ -114,10 +114,12 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  # A v* tag publishes a permanent release; a master merge force-moves the
+  # `latest` tag so /releases/tag/latest always serves the newest master build.
   release:
     name: release
     needs: build
-    if: github.ref_type == 'tag'
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -127,12 +129,37 @@ jobs:
           path: release
           merge-multiple: true
 
-      - name: Publish GitHub release
+      - name: Publish tagged release
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --repo "${{ github.repository }}" \
-            --title "${{ github.ref_name }}" \
+          set -euo pipefail
+          gh release create "$TAG" \
+            --repo "$REPO" \
+            --title "$TAG" \
             --generate-notes \
+            release/*
+
+      - name: Publish rolling 'latest' prerelease
+        if: github.ref_type == 'branch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # Drop the previous rolling release, then any tag it left behind.
+          gh release delete latest --repo "$REPO" --yes --cleanup-tag 2>/dev/null || true
+          gh api -X DELETE "repos/$REPO/git/refs/tags/latest" 2>/dev/null || true
+
+          gh release create latest \
+            --repo "$REPO" \
+            --target "$SHA" \
+            --title "Latest master build (${SHA:0:7})" \
+            --prerelease \
+            --notes "Production build of master @ \`${SHA:0:7}\`. Replaced on every merge - pin a v* tag for a stable download." \
             release/*
