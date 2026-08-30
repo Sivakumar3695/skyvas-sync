@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 
 from PySide6.QtCore import (
+    QDir,
     QObject,
     QStandardPaths,
     Qt,
@@ -350,20 +351,38 @@ class AsyncFolderDialog(QDialog):
         root.addWidget(bottom_frame)
 
     def _populate_sidebar(self) -> None:
-        """Add Home, /, and any GVFS-mounted devices to the sidebar."""
+        """Add Home, the filesystem roots, and any removable devices."""
         home = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.HomeLocation,
         )
         self._add_sidebar_item("🏠  Home", home)
-        self._add_sidebar_item("💻  Root  /", "/")
 
-        # GVFS mounts (MTP phones, cameras, etc.)
+        if os.name == "nt":
+            self._populate_windows_drives()
+        else:
+            self._add_sidebar_item("💻  Root  /", "/")
+            self._populate_gvfs_mounts()
+
+    def _populate_windows_drives(self) -> None:
+        """Add every mounted drive (C:, D:, a plugged-in phone, …)."""
+        for drive in QDir.drives():
+            path = drive.absoluteFilePath()  # e.g. "C:/"
+            label = path.rstrip("/") or path  # "C:/" -> "C:"
+            self._add_sidebar_item(f"💻  {label}", path)
+
+    def _populate_gvfs_mounts(self) -> None:
+        """Add GVFS mounts (MTP phones, cameras, etc.) — Unix only."""
         gvfs_root = Path(f"/run/user/{os.getuid()}/gvfs")
-        if gvfs_root.is_dir():
-            for entry in sorted(gvfs_root.iterdir()):
-                if entry.is_dir():
-                    label = self._friendly_device_name(entry.name)
-                    self._add_sidebar_item(f"📱  {label}", str(entry))
+        try:
+            if not gvfs_root.is_dir():
+                return
+            entries = sorted(gvfs_root.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            if entry.is_dir():
+                label = self._friendly_device_name(entry.name)
+                self._add_sidebar_item(f"📱  {label}", str(entry))
 
     @staticmethod
     def _friendly_device_name(raw: str) -> str:
@@ -476,35 +495,3 @@ class AsyncFolderDialog(QDialog):
             self._worker.quit()
             self._worker.wait()
             self._worker = None
-
-
-
-# ---------------------------------------------------------------------------
-# Background thread for listing subdirectories
-# ---------------------------------------------------------------------------
-
-class _ListDirsThread(QThread):
-    """List immediate subdirectories of *path* without blocking the UI."""
-
-    finished = Signal(list)  # list[tuple[str, str]]  — (name, full_path)
-
-    def __init__(self, path: str, parent: QObject | None = None) -> None:
-        super().__init__(parent)
-        self._path = path
-
-    def run(self) -> None:
-        results: list[tuple[str, str]] = []
-        try:
-            root = Path(self._path)
-            if root.is_dir():
-                for entry in sorted(root.iterdir()):
-                    if self.isInterruptionRequested():
-                        return
-                    try:
-                        if entry.is_dir():
-                            results.append((entry.name, str(entry)))
-                    except OSError:
-                        pass  # permission error, broken symlink, etc.
-        except OSError:
-            pass
-        self.finished.emit(results)
