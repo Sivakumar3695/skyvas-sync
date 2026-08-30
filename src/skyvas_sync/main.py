@@ -13,6 +13,7 @@ from skyvas_sync.auth.token_store import TokenStore
 from skyvas_sync.api.client import ApiClient
 from skyvas_sync.config import get_config
 from skyvas_sync.ui.main_window import MainWindow
+from skyvas_sync.ui.theme import APP_QSS
 
 
 def _resolve_icon() -> QIcon:
@@ -37,6 +38,7 @@ def main() -> None:  # pragma: no cover
     app.setApplicationName("Skyvas Sync")
     app.setDesktopFileName("skyvassync")
     app.setWindowIcon(_resolve_icon())
+    app.setStyleSheet(APP_QSS)
 
     config = get_config()
     auth = CognitoAuth(config)

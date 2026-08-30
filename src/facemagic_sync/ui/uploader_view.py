@@ -249,8 +249,11 @@ class UploaderView(QWidget):
     def _on_progress(self, uploaded: int, total: int, current: str) -> None:
         pct = int(uploaded / total * 100) if total else 0
         self._progress_bar.setValue(pct)
+        count_str = f"{uploaded} / {total}" if total else ""
         if current:
-            self._current_file.setText(f"Uploading: {current}")
+            self._current_file.setText(f"Uploading {count_str}: {current}")
+        elif count_str:
+            self._current_file.setText(f"Uploading {count_str}…")
         else:
             self._current_file.setText("")
         self._status.uploaded = uploaded

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
 
@@ -12,6 +13,7 @@ from PySide6.QtCore import QCoreApplication
 from skyvas_sync.api.client import ApiClient, ApiError
 from skyvas_sync.api.models import Event, UploadUrl
 from skyvas_sync.upload.instant_sync import InstantSyncManager, _BatchUploadThread
+from skyvas_sync.utils.image_utils import MAX_UPLOAD_BYTES
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +65,26 @@ class TestBatchUploadThread:
         assert finished
         assert mock_api.get_upload_url.call_count == 3
         assert mock_api.upload_to_s3.call_count == 3
+
+    def test_large_file_is_compressed_before_upload(
+        self, mock_api: MagicMock, tmp_path: Path
+    ):
+        path = tmp_path / "big.png"
+        noise = os.urandom(2400 * 1800 * 3)
+        Image.frombytes("RGB", (2400, 1800), noise).save(path)
+        assert path.stat().st_size > MAX_UPLOAD_BYTES
+
+        thread = _BatchUploadThread(mock_api, "evt-1", [path])
+        errors: list[tuple[str, str]] = []
+        thread.file_error.connect(lambda p, e: errors.append((p, e)))
+
+        thread.run()
+
+        assert errors == []
+        sent_bytes = mock_api.upload_to_s3.call_args[0][1]
+        assert len(sent_bytes) <= MAX_UPLOAD_BYTES
+        assert mock_api.upload_to_s3.call_args[0][2] == "image/jpeg"
+        assert mock_api.get_upload_url.call_args[0][1] == "big.jpg"
 
     def test_upload_with_error(self, mock_api: MagicMock, tmp_path: Path):
         _create_image(tmp_path / "a.jpg")

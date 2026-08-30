@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
 
@@ -12,6 +14,7 @@ from PySide6.QtCore import QCoreApplication
 from skyvas_sync.api.client import ApiClient, ApiError
 from skyvas_sync.api.models import Event, UploadUrl
 from skyvas_sync.upload.uploader import UploadWorker
+from skyvas_sync.utils.image_utils import MAX_UPLOAD_BYTES
 
 
 @pytest.fixture()
@@ -68,13 +71,10 @@ class TestUploadWorker:
         assert finished
 
     def test_upload_with_error(self, qtbot, mock_api: MagicMock, small_folder: Path):
-        # Make the second upload fail
-        call_count = {"n": 0}
-        original = mock_api.upload_to_s3
-
-        def side_effect(*args, **kwargs):
-            call_count["n"] += 1
-            if call_count["n"] == 2:
+        # Make img1.jpg always fail (all retries exhausted)
+        def side_effect(url, file_bytes, mime, width, height):
+            # Identify the failing file by its dimensions (img1 is 51x41)
+            if width == 51:
                 raise ApiError(500, "server error")
 
         mock_api.upload_to_s3.side_effect = side_effect
@@ -85,7 +85,8 @@ class TestUploadWorker:
         worker.file_done.connect(lambda p: done_files.append(p))
         worker.file_error.connect(lambda p, e: error_files.append((p, e)))
 
-        with qtbot.waitSignal(worker.finished_all, timeout=10000):
+        with patch("skyvas_sync.upload.uploader.time.sleep"), \
+             qtbot.waitSignal(worker.finished_all, timeout=10000):
             worker.start()
 
         assert len(done_files) == 2
@@ -151,6 +152,26 @@ class TestUploadSingle:
         assert args[0][0] == "https://s3.example.com/put"
         assert args[0][2] == "image/jpeg"
 
+    def test_large_file_is_compressed_before_upload(
+        self, mock_api: MagicMock, tmp_path: Path
+    ):
+        path = tmp_path / "big.png"
+        noise = os.urandom(2400 * 1800 * 3)
+        Image.frombytes("RGB", (2400, 1800), noise).save(path)
+        assert path.stat().st_size > MAX_UPLOAD_BYTES
+
+        worker = UploadWorker(mock_api, "evt-1", [tmp_path])
+        worker._upload_single(path)
+
+        sent_bytes = mock_api.upload_to_s3.call_args[0][1]
+        assert len(sent_bytes) <= MAX_UPLOAD_BYTES
+        assert mock_api.upload_to_s3.call_args[0][2] == "image/jpeg"
+        # The filename and dimensions reported to the API describe the
+        # compressed bytes, not the file on disk.
+        name, width, height = mock_api.get_upload_url.call_args[0][1:]
+        assert name == "big.jpg"
+        assert (width, height) == Image.open(io.BytesIO(sent_bytes)).size
+
 
 class TestUploadWorkerRunDirect:
     """Call run() directly to ensure coverage of the method body."""
@@ -202,11 +223,9 @@ class TestUploadWorkerRunDirect:
         assert len(done_files) <= 1
 
     def test_run_file_error_continues(self, mock_api: MagicMock, small_folder: Path):
-        call_count = {"n": 0}
-
-        def side_effect(*args, **kwargs):
-            call_count["n"] += 1
-            if call_count["n"] == 2:
+        # Make img1.jpg (width=51) always fail all retries
+        def side_effect(url, file_bytes, mime, width, height):
+            if width == 51:
                 raise ApiError(500, "server error")
 
         mock_api.upload_to_s3.side_effect = side_effect
@@ -217,7 +236,8 @@ class TestUploadWorkerRunDirect:
         worker.file_done.connect(lambda p: done_files.append(p))
         worker.file_error.connect(lambda p, e: error_files.append((p, e)))
 
-        worker.run()
+        with patch("skyvas_sync.upload.uploader.time.sleep"):
+            worker.run()
 
         assert len(done_files) == 2
         assert len(error_files) == 1

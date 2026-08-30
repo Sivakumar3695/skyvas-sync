@@ -8,7 +8,7 @@ A cross-platform desktop application for instant photo sync from local folders t
 - **Event browsing** — view all your existing events
 - **Folder-based upload** — select a folder and recursively upload all images
 - **Live upload progress** — track uploads with a progress bar and file counts
-- **Local album view** — browse images from the selected folder organized by subfolder structure
+- **Instant Sync** — watch a folder (including MTP-mounted Android phones) for new photos and upload them automatically
 - **Upload status** — see per-event upload counts in the events list
 
 ## Prerequisites
@@ -123,6 +123,47 @@ bash scripts/build_all.sh production
 |---|---|---|
 | `SKYVAS_ENV` | `staging` | `staging` or `production` |
 
+## Instant Sync — Polling Configuration
+
+Instant Sync watches a folder for new images and uploads them automatically.
+New-file detection uses two complementary mechanisms:
+
+| Mechanism | How it works | Works on MTP? |
+|---|---|---|
+| **inotify** (`QFileSystemWatcher`) | Kernel-level instant notification when a file appears | ❌ No — MTP/GVFS is a userspace filesystem |
+| **Polling** | Background thread re-scans the folder tree at a fixed interval | ✅ Yes |
+
+Polling is the only reliable detection method for MTP-mounted devices (e.g. Android
+phones connected via USB). It is enabled by default.
+
+### Configuration
+
+The poll interval is set via the `poll_interval_ms` parameter on `FolderWatcher`
+(in `src/skyvas_sync/upload/watcher.py`):
+
+| Parameter | Default | Description |
+|---|---|---|
+| `poll_interval_ms` | `5000` (5 s) | How often to re-scan the watched folder for new images. Set to `0` to disable polling entirely. |
+| `stabilize_ms` | `1000` (1 s) | Debounce delay for inotify events before processing. |
+
+### Latency
+
+| Scenario | Typical latency | Notes |
+|---|---|---|
+| Local folder (inotify) | < 1 s | Instant kernel notification |
+| MTP device (polling) | 3–7 s | Depends on folder size and USB speed |
+| MTP device (worst case) | ~10 s | Poll fires just before photo appears + slow rglob |
+
+To reduce latency for live events, lower the poll interval:
+
+```python
+# In src/skyvas_sync/upload/instant_sync.py
+self._watcher = FolderWatcher(folder, parent=self, poll_interval_ms=2000)  # 2 seconds
+```
+
+> **Trade-off:** A shorter interval increases USB/MTP traffic and may cause slightly
+> higher battery drain on the connected device.
+
 ## Architecture
 
 ```
@@ -137,13 +178,15 @@ src/skyvas_sync/
 │   └── models.py        # Data models
 ├── upload/
 │   ├── scanner.py       # Recursive folder image scanner
-│   └── uploader.py      # Background upload worker (QThread)
+│   ├── uploader.py      # Background upload worker (QThread)
+│   ├── watcher.py       # Filesystem watcher with inotify + polling fallback
+│   └── instant_sync.py  # Automatic upload of new images from a watched folder
 ├── ui/
 │   ├── main_window.py   # Main window with view stack
 │   ├── login_view.py    # Google sign-in view
 │   ├── events_list_view.py  # Events table with upload status
 │   ├── uploader_view.py # Folder picker + progress
-│   └── album_view.py    # Local folder album browser
+    └── login_view.py    # Google sign-in view
 └── utils/
     └── image_utils.py   # Image dimension/thumbnail helpers
 ```

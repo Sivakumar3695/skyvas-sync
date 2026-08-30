@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+import io
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from PIL import Image
 
 from skyvas_sync.utils.image_utils import (
     IMAGE_EXTENSIONS,
+    MAX_UPLOAD_BYTES,
     THUMBNAIL_SIZE,
+    compress_image,
     create_thumbnail,
     get_image_dimensions,
     get_mime_type,
     is_image,
+    prepare_for_upload,
 )
 
 
@@ -150,3 +156,97 @@ class TestImageExtensions:
         assert ".jpg" in IMAGE_EXTENSIONS
         assert ".png" in IMAGE_EXTENSIONS
         assert ".jpeg" in IMAGE_EXTENSIONS
+
+
+def _make_large_image(path: Path, size: tuple[int, int] = (2400, 1800)) -> Path:
+    """Write an image that is well over MAX_UPLOAD_BYTES on disk."""
+    # Random pixels defeat compression, guaranteeing a large file.
+    noise = os.urandom(size[0] * size[1] * 3)
+    Image.frombytes("RGB", size, noise).save(path, quality=100)
+    return path
+
+
+class TestCompressImage:
+    def test_fits_within_limit(self, tmp_path: Path):
+        path = _make_large_image(tmp_path / "big.jpg")
+        assert path.stat().st_size > MAX_UPLOAD_BYTES
+
+        data, width, height = compress_image(path)
+
+        assert len(data) <= MAX_UPLOAD_BYTES
+        assert (width, height) == Image.open(io.BytesIO(data)).size
+
+    def test_respects_custom_limit(self, tmp_path: Path):
+        path = _make_large_image(tmp_path / "big.jpg")
+        data, _, _ = compress_image(path, max_bytes=500 * 1024)
+        assert len(data) <= 500 * 1024
+
+    def test_output_is_jpeg(self, tmp_path: Path):
+        path = _make_large_image(tmp_path / "big.png")
+        data, _, _ = compress_image(path)
+        assert Image.open(io.BytesIO(data)).format == "JPEG"
+
+    def test_downscales_when_quality_is_not_enough(self, tmp_path: Path):
+        path = _make_large_image(tmp_path / "big.jpg")
+        _, width, height = compress_image(path, max_bytes=200 * 1024)
+        assert (width, height) < (2400, 1800)
+
+    def test_stops_downscaling_at_min_dimension(self, tmp_path: Path):
+        # An unreachably small limit — best effort is returned instead of
+        # shrinking forever.
+        path = _make_large_image(tmp_path / "big.jpg")
+        _, width, height = compress_image(path, max_bytes=1)
+        assert min(width, height) >= 640 * 0.75
+
+
+class TestPrepareForUpload:
+    def test_small_image_is_untouched(self, tmp_path: Path):
+        path = tmp_path / "small.png"
+        Image.new("RGB", (640, 480)).save(path)
+
+        prepared = prepare_for_upload(path)
+
+        assert prepared.compressed is False
+        assert prepared.data == path.read_bytes()
+        assert prepared.filename == "small.png"
+        assert prepared.mime_type == "image/png"
+        assert (prepared.width, prepared.height) == (640, 480)
+
+    def test_image_at_limit_is_untouched(self, tmp_path: Path):
+        path = tmp_path / "exact.jpg"
+        Image.new("RGB", (100, 100)).save(path)
+        assert path.stat().st_size <= MAX_UPLOAD_BYTES
+
+        prepared = prepare_for_upload(path, max_bytes=path.stat().st_size)
+
+        assert prepared.compressed is False
+
+    def test_large_image_is_compressed(self, tmp_path: Path):
+        path = _make_large_image(tmp_path / "big.jpg")
+
+        prepared = prepare_for_upload(path)
+
+        assert prepared.compressed is True
+        assert len(prepared.data) <= MAX_UPLOAD_BYTES
+        assert len(prepared.data) < path.stat().st_size
+        assert prepared.mime_type == "image/jpeg"
+        assert (prepared.width, prepared.height) == Image.open(
+            io.BytesIO(prepared.data)
+        ).size
+
+    def test_compressed_filename_gets_jpg_suffix(self, tmp_path: Path):
+        path = _make_large_image(tmp_path / "big.png")
+        assert prepare_for_upload(path).filename == "big.jpg"
+
+    def test_falls_back_to_original_when_compression_fails(self, tmp_path: Path):
+        path = _make_large_image(tmp_path / "big.jpg")
+
+        with patch(
+            "skyvas_sync.utils.image_utils.compress_image",
+            side_effect=OSError("boom"),
+        ):
+            prepared = prepare_for_upload(path)
+
+        assert prepared.compressed is False
+        assert prepared.data == path.read_bytes()
+        assert prepared.filename == "big.jpg"

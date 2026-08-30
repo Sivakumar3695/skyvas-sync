@@ -10,7 +10,9 @@ STATUS_LABELS: dict[int, str] = {
     1: "Upload In Progress",
     2: "Photo Uploaded",
     3: "Face Match In Progress",
-    4: "Completed",
+    4: "Results Ready",
+    5: "Whatsapp Sharing In Progress",
+    6: "Event Completed",
 }
 
 

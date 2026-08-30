@@ -1,0 +1,10 @@
+# Normalize text files in the repo, but keep platform-specific scripts
+# checked out with the line endings their interpreter requires.
+* text=auto
+
+# cmd.exe mis-parses batch files that use bare LF endings.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Shell scripts must stay LF even when checked out on Windows.
+*.sh text eol=lf

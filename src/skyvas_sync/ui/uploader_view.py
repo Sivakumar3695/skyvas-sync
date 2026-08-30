@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import Signal, Qt, QTimer
 from PySide6.QtWidgets import (
-    QFileDialog,
+    QDialog,
     QHBoxLayout,
     QLabel,
     QProgressBar,
@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from skyvas_sync.ui.folder_dialog import AsyncFolderDialog
 
 from skyvas_sync.api.client import ApiClient, ApiError
 from skyvas_sync.api.models import Event, UploadStatus
@@ -49,19 +51,24 @@ class UploaderView(QWidget):
         self._folders: list[Path] = []
         self._worker: UploadWorker | None = None
         self._status = UploadStatus(event_id="")
+        self._failed_paths: list[Path] = []
         self._instant_sync: InstantSyncManager | None = None
         self._instant_sync_folder: Path | None = None
+        self._poll_countdown: int = 0
+        self._poll_tick_timer: QTimer | None = None
         self._setup_ui()
 
     # -- UI -----------------------------------------------------------------
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
 
         # Folder selection header + browse button
         folder_header = QHBoxLayout()
         self._folder_heading = QLabel("Selected folders:")
-        self._folder_heading.setStyleSheet("color: #666; font-weight: bold;")
+        self._folder_heading.setStyleSheet("color: #6B7280; font-weight: 600;")
         folder_header.addWidget(self._folder_heading, stretch=1)
 
         self._browse_btn = QPushButton("Add Folder")
@@ -76,15 +83,24 @@ class UploaderView(QWidget):
         self._folders_layout.setSpacing(2)
 
         self._no_folder_label = QLabel("No folder selected")
-        self._no_folder_label.setStyleSheet("color: #999; font-style: italic;")
+        self._no_folder_label.setStyleSheet("color: #9CA3AF; font-style: italic;")
         self._folders_layout.addWidget(self._no_folder_label)
 
         layout.addWidget(self._folders_widget)
 
         # Image count
         self._count_label = QLabel("")
-        self._count_label.setStyleSheet("color: #444; margin: 4px 0;")
+        self._count_label.setStyleSheet("color: #374151; margin: 4px 0;")
         layout.addWidget(self._count_label)
+
+        # Locked notice (shown when event status >= 2 and uploads are disabled)
+        self._locked_label = QLabel("")
+        self._locked_label.setStyleSheet(
+            "color: #B45309; background: #FEF3C7; border-radius: 4px;"
+            "padding: 4px 8px; font-size: 13px;"
+        )
+        self._locked_label.setVisible(False)
+        layout.addWidget(self._locked_label)
 
         # Action buttons
         btn_layout = QHBoxLayout()
@@ -94,6 +110,7 @@ class UploaderView(QWidget):
         btn_layout.addWidget(self._start_btn)
 
         self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setProperty("styleClass", "secondary")
         self._cancel_btn.setEnabled(False)
         self._cancel_btn.clicked.connect(self._on_cancel)
         btn_layout.addWidget(self._cancel_btn)
@@ -103,6 +120,13 @@ class UploaderView(QWidget):
         self._complete_btn.setVisible(False)
         self._complete_btn.clicked.connect(self._on_mark_complete)
         btn_layout.addWidget(self._complete_btn)
+
+        self._retry_btn = QPushButton("Retry Failed")
+        self._retry_btn.setEnabled(False)
+        self._retry_btn.setVisible(False)
+        self._retry_btn.setProperty("styleClass", "danger")
+        self._retry_btn.clicked.connect(self._on_retry_failed)
+        btn_layout.addWidget(self._retry_btn)
 
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
@@ -115,40 +139,38 @@ class UploaderView(QWidget):
 
         # Current file label
         self._current_file = QLabel("")
-        self._current_file.setStyleSheet("color: #888; font-size: 12px;")
+        self._current_file.setStyleSheet("color: #6B7280; font-size: 14px;")
         layout.addWidget(self._current_file)
 
         # Log area
         self._log = QTextEdit()
         self._log.setReadOnly(True)
         self._log.setMaximumHeight(150)
-        self._log.setStyleSheet("font-size: 11px;")
+        self._log.setStyleSheet("font-size: 13px;")
         layout.addWidget(self._log)
 
         # ── Instant Sync section ────────────────────────────────────
         sync_heading = QLabel("Instant Sync")
         sync_heading.setStyleSheet(
-            "font-size: 14px; font-weight: bold; margin-top: 12px;"
+            "font-size: 16px; font-weight: 700; margin-top: 14px; color: #1A1A2E;"
         )
         layout.addWidget(sync_heading)
 
         sync_row = QHBoxLayout()
         self._sync_folder_label = QLabel("No folder selected")
         self._sync_folder_label.setStyleSheet(
-            "color: #999; font-style: italic;"
+            "color: #9CA3AF; font-style: italic;"
         )
         sync_row.addWidget(self._sync_folder_label, stretch=1)
 
         self._sync_browse_btn = QPushButton("Select Folder")
+        self._sync_browse_btn.setProperty("styleClass", "secondary")
         self._sync_browse_btn.clicked.connect(self._on_sync_browse)
         sync_row.addWidget(self._sync_browse_btn)
 
         self._sync_clear_btn = QPushButton("\u2715")
         self._sync_clear_btn.setFixedSize(22, 22)
-        self._sync_clear_btn.setStyleSheet(
-            "QPushButton { color: #888; background: transparent; border: none; font-size: 13px; }"
-            "QPushButton:hover { color: #d44; }"
-        )
+        self._sync_clear_btn.setProperty("styleClass", "ghost")
         self._sync_clear_btn.setToolTip("Stop instant sync and remove folder")
         self._sync_clear_btn.setEnabled(False)
         self._sync_clear_btn.clicked.connect(self._on_sync_clear)
@@ -157,13 +179,23 @@ class UploaderView(QWidget):
         layout.addLayout(sync_row)
 
         self._sync_status = QLabel("")
-        self._sync_status.setStyleSheet("color: #888; font-size: 12px;")
+        self._sync_status.setStyleSheet("color: #6B7280; font-size: 14px;")
         layout.addWidget(self._sync_status)
+
+        # Polling status row
+        poll_row = QHBoxLayout()
+        self._poll_indicator = QLabel("")
+        self._poll_indicator.setStyleSheet("color: #888; font-size: 13px;")
+        poll_row.addWidget(self._poll_indicator, stretch=1)
+        self._poll_countdown_label = QLabel("")
+        self._poll_countdown_label.setStyleSheet("color: #888; font-size: 13px;")
+        poll_row.addWidget(self._poll_countdown_label)
+        layout.addLayout(poll_row)
 
         self._sync_log = QTextEdit()
         self._sync_log.setReadOnly(True)
         self._sync_log.setMaximumHeight(100)
-        self._sync_log.setStyleSheet("font-size: 11px;")
+        self._sync_log.setStyleSheet("font-size: 13px;")
         layout.addWidget(self._sync_log)
 
         layout.addStretch()
@@ -176,12 +208,9 @@ class UploaderView(QWidget):
         return self._instant_sync_folder
 
     @property
-    def all_folders(self) -> list[Path]:
-        """All folders (upload + instant-sync) for album view."""
-        result = list(self._folders)
-        if self._instant_sync_folder and self._instant_sync_folder not in result:
-            result.append(self._instant_sync_folder)
-        return result
+    def _is_upload_locked(self) -> bool:
+        """Return True when the event status no longer allows new uploads."""
+        return self._event is not None and self._event.status_code >= 2
 
     def set_event(self, event: Event) -> None:
         """Configure the view for a specific event."""
@@ -196,14 +225,29 @@ class UploaderView(QWidget):
         saved_sync = self._settings.get_instant_sync_folder(event.id)
         if saved_sync is not None:
             self._start_instant_sync(saved_sync)
+        # Lock upload controls when the event is past the upload stage
+        if self._is_upload_locked:
+            self._browse_btn.setEnabled(False)
+            self._start_btn.setEnabled(False)
+            self._locked_label.setText(
+                f"\u26a0\ufe0f Uploads are disabled — event status is \"{event.status_label}\"."
+            )
+            self._locked_label.setVisible(True)
 
     # -- handlers -----------------------------------------------------------
 
+    def _make_folder_dialog(self, title: str) -> AsyncFolderDialog:
+        """Create an async folder browser safe for MTP/GVFS devices."""
+        return AsyncFolderDialog(self, title)
+
     def _on_browse(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Select image folder")
-        if not folder:
+        dlg = self._make_folder_dialog("Select image folder")
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        self._apply_folder(Path(folder))
+        selected = dlg.selected_path()
+        if selected is None:
+            return
+        self._apply_folder(selected)
 
     def _apply_folder(self, folder: Path) -> None:
         """Add a folder to the list, update UI, and persist the mapping."""
@@ -227,15 +271,12 @@ class UploaderView(QWidget):
         row_layout.setSpacing(4)
 
         label = QLabel(str(folder))
-        label.setStyleSheet("color: #333;")
+        label.setStyleSheet("color: #374151;")
         row_layout.addWidget(label, stretch=1)
 
         remove_btn = QPushButton("\u2715")
         remove_btn.setFixedSize(22, 22)
-        remove_btn.setStyleSheet(
-            "QPushButton { color: #888; background: transparent; border: none; font-size: 13px; }"
-            "QPushButton:hover { color: #d44; }"
-        )
+        remove_btn.setProperty("styleClass", "ghost")
         remove_btn.setToolTip("Remove this folder")
         remove_btn.clicked.connect(lambda checked=False, f=folder: self._remove_folder(f))
         row_layout.addWidget(remove_btn)
@@ -268,22 +309,40 @@ class UploaderView(QWidget):
             total += len(scan_folder(folder))
         self._count_label.setText(f"{total} image(s) found")
         self._status.total = total
-        self._start_btn.setEnabled(total > 0)
+        self._start_btn.setEnabled(total > 0 and not self._is_upload_locked)
 
     def _on_start(self) -> None:
         if self._event is None or not self._folders:
+            return
+        self._start_upload_worker(list(self._folders))
+
+    def _on_retry_failed(self) -> None:
+        if self._event is None or not self._failed_paths:
+            return
+        self._start_upload_worker([], files=list(self._failed_paths))
+
+    def _start_upload_worker(
+        self,
+        folders: list[Path],
+        *,
+        files: list[Path] | None = None,
+    ) -> None:
+        if self._event is None:
             return
         self._start_btn.setEnabled(False)
         self._browse_btn.setEnabled(False)
         self._cancel_btn.setEnabled(True)
         self._complete_btn.setEnabled(False)
+        self._retry_btn.setEnabled(False)
+        self._retry_btn.setVisible(False)
         self._log.clear()
         self._status.uploaded = 0
         self._status.failed = 0
         self._status.errors.clear()
+        self._failed_paths = []
 
         self._worker = UploadWorker(
-            self._api, self._event.id, list(self._folders),
+            self._api, self._event.id, folders, files=files,
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.file_done.connect(self._on_file_done)
@@ -300,8 +359,11 @@ class UploaderView(QWidget):
     def _on_progress(self, uploaded: int, total: int, current: str) -> None:
         pct = int(uploaded / total * 100) if total else 0
         self._progress_bar.setValue(pct)
+        count_str = f"{uploaded} / {total}" if total else ""
         if current:
-            self._current_file.setText(f"Uploading: {current}")
+            self._current_file.setText(f"Uploading {count_str}: {current}")
+        elif count_str:
+            self._current_file.setText(f"Uploading {count_str}…")
         else:
             self._current_file.setText("")
         self._status.uploaded = uploaded
@@ -315,6 +377,7 @@ class UploaderView(QWidget):
         self._status.failed += 1
         self._status.errors.append(f"{path}: {error}")
         self._log.append(f"✗ {Path(path).name}: {error}")
+        self._failed_paths.append(Path(path))
 
     def _on_finished(self) -> None:
         self._start_btn.setEnabled(True)
@@ -329,6 +392,11 @@ class UploaderView(QWidget):
         # Show the "Mark Upload Complete" button so the user can finalise
         self._complete_btn.setVisible(True)
         self._complete_btn.setEnabled(True)
+        # Show "Retry Failed" button when there are failed files
+        if failed > 0:
+            self._retry_btn.setText(f"Retry Failed ({failed})")
+            self._retry_btn.setVisible(True)
+            self._retry_btn.setEnabled(True)
         self.upload_status_changed.emit(self._status)
         self._worker = None
 
@@ -347,9 +415,11 @@ class UploaderView(QWidget):
         if self._event is not None:
             self._settings.clear_instant_sync_folder(self._event.id)
         self._sync_folder_label.setText("No folder selected")
-        self._sync_folder_label.setStyleSheet("color: #999; font-style: italic;")
+        self._sync_folder_label.setStyleSheet("color: #9CA3AF; font-style: italic;")
         self._sync_clear_btn.setEnabled(False)
         self._sync_status.setText("")
+        self._poll_indicator.setText("")
+        self._poll_countdown_label.setText("")
 
     def _on_fatal_error(self, message: str) -> None:
         self._log.append(f"ERROR: {message}")
@@ -357,12 +427,13 @@ class UploaderView(QWidget):
     # -- instant-sync handlers -----------------------------------------------
 
     def _on_sync_browse(self) -> None:
-        folder = QFileDialog.getExistingDirectory(
-            self, "Select instant sync folder",
-        )
-        if not folder:
+        dlg = self._make_folder_dialog("Select instant sync folder")
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        self._start_instant_sync(Path(folder))
+        selected = dlg.selected_path()
+        if selected is None:
+            return
+        self._start_instant_sync(selected)
 
     def _start_instant_sync(self, folder: Path) -> None:
         """Start instant-sync on *folder* (stops any previous sync first)."""
@@ -374,10 +445,10 @@ class UploaderView(QWidget):
         self._settings.set_instant_sync_folder(self._event.id, folder)
 
         self._sync_folder_label.setText(str(folder))
-        self._sync_folder_label.setStyleSheet("color: #333;")
+        self._sync_folder_label.setStyleSheet("color: #374151;")
         self._sync_clear_btn.setEnabled(True)
         self._sync_status.setText("\u25cf Active")
-        self._sync_status.setStyleSheet("color: #2a2; font-size: 12px;")
+        self._sync_status.setStyleSheet("color: #2E7D32; font-size: 14px;")
         self._sync_log.clear()
 
         self._instant_sync = InstantSyncManager(
@@ -386,7 +457,18 @@ class UploaderView(QWidget):
         self._instant_sync.file_uploaded.connect(self._on_sync_file_uploaded)
         self._instant_sync.file_error.connect(self._on_sync_file_error)
         self._instant_sync.upload_progress.connect(self._on_sync_progress)
+        self._instant_sync.poll_started.connect(self._on_poll_started)
+        self._instant_sync.poll_finished.connect(self._on_poll_finished)
         self._instant_sync.start()
+
+        # Start UI countdown timer (ticks every 1 s)
+        self._poll_countdown = 5
+        self._poll_indicator.setText("⏳ Polling idle")
+        self._poll_countdown_label.setText("Next poll in 5s")
+        self._poll_tick_timer = QTimer(self)
+        self._poll_tick_timer.setInterval(1000)
+        self._poll_tick_timer.timeout.connect(self._on_poll_ui_tick)
+        self._poll_tick_timer.start()
 
         # The user can mark upload complete while sync is running
         self._complete_btn.setVisible(True)
@@ -394,6 +476,11 @@ class UploaderView(QWidget):
 
     def _stop_instant_sync(self) -> None:
         """Stop the current instant-sync session, if any."""
+        if self._poll_tick_timer is not None:
+            self._poll_tick_timer.stop()
+            self._poll_tick_timer = None
+        self._poll_indicator.setText("")
+        self._poll_countdown_label.setText("")
         if self._instant_sync is not None:
             self._instant_sync.stop()
             self._instant_sync = None
@@ -405,9 +492,11 @@ class UploaderView(QWidget):
         if self._event is not None:
             self._settings.clear_instant_sync_folder(self._event.id)
         self._sync_folder_label.setText("No folder selected")
-        self._sync_folder_label.setStyleSheet("color: #999; font-style: italic;")
+        self._sync_folder_label.setStyleSheet("color: #9CA3AF; font-style: italic;")
         self._sync_clear_btn.setEnabled(False)
         self._sync_status.setText("")
+        self._poll_indicator.setText("")
+        self._poll_countdown_label.setText("")
 
     def _on_sync_file_uploaded(self, path: str) -> None:
         self._sync_log.append(f"\u2713 {Path(path).name}")
@@ -419,7 +508,34 @@ class UploaderView(QWidget):
         self._sync_status.setText(
             f"\u25cf Active \u2014 {uploaded}/{total} uploaded",
         )
-        self._sync_status.setStyleSheet("color: #2a2; font-size: 12px;")
+        self._sync_status.setStyleSheet("color: #2E7D32; font-size: 14px;")
+
+    # -- polling UI slots ----------------------------------------------------
+
+    def _on_poll_started(self) -> None:
+        """Watcher started scanning the folder tree."""
+        self._poll_indicator.setText("\U0001f504 Scanning…")
+        self._poll_indicator.setStyleSheet("color: #D97706; font-size: 13px;")
+        self._poll_countdown_label.setText("")
+
+    def _on_poll_finished(self, new_files: int) -> None:
+        """Watcher finished a poll scan."""
+        if new_files:
+            self._poll_indicator.setText(f"\u2714 Found {new_files} new file{'s' if new_files != 1 else ''}")
+            self._poll_indicator.setStyleSheet("color: #2E7D32; font-size: 13px;")
+        else:
+            self._poll_indicator.setText("\u2714 No new files")
+            self._poll_indicator.setStyleSheet("color: #6B7280; font-size: 13px;")
+        # Reset countdown
+        self._poll_countdown = 5
+        self._poll_countdown_label.setText("Next poll in 5s")
+        self._poll_countdown_label.setStyleSheet("color: #6B7280; font-size: 13px;")
+
+    def _on_poll_ui_tick(self) -> None:
+        """Tick the countdown label every second."""
+        if self._poll_countdown > 0:
+            self._poll_countdown -= 1
+            self._poll_countdown_label.setText(f"Next poll in {self._poll_countdown}s")
 
     # -- helpers ------------------------------------------------------------
 
@@ -437,16 +553,22 @@ class UploaderView(QWidget):
                 widget.deleteLater()
         self._no_folder_label.setVisible(True)
         self._count_label.setText("")
+        self._browse_btn.setEnabled(True)
         self._start_btn.setEnabled(False)
         self._cancel_btn.setEnabled(False)
         self._complete_btn.setEnabled(False)
         self._complete_btn.setVisible(False)
+        self._retry_btn.setEnabled(False)
+        self._retry_btn.setVisible(False)
         self._progress_bar.setValue(0)
         self._current_file.setText("")
         self._log.clear()
+        self._locked_label.setVisible(False)
         # Reset instant-sync UI
         self._sync_folder_label.setText("No folder selected")
-        self._sync_folder_label.setStyleSheet("color: #999; font-style: italic;")
+        self._sync_folder_label.setStyleSheet("color: #9CA3AF; font-style: italic;")
         self._sync_clear_btn.setEnabled(False)
         self._sync_status.setText("")
+        self._poll_indicator.setText("")
+        self._poll_countdown_label.setText("")
         self._sync_log.clear()

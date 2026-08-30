@@ -66,21 +66,21 @@ class LoginView(QWidget):
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         title = QLabel("Skyvas Sync")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; margin-bottom: 8px;")
+        title.setStyleSheet("font-size: 28px; font-weight: 700; margin-bottom: 6px;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         subtitle = QLabel("Sign in to sync photos from your computer")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle.setStyleSheet("color: #666; margin-bottom: 24px;")
+        subtitle.setStyleSheet("color: #6B7280; margin-bottom: 28px; font-size: 16px;")
 
         self._btn = QPushButton("Sign in with Google")
-        self._btn.setFixedWidth(220)
-        self._btn.setFixedHeight(40)
+        self._btn.setFixedWidth(240)
+        self._btn.setFixedHeight(44)
         self._btn.clicked.connect(self._on_login_clicked)
 
         self._status = QLabel("")
         self._status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._status.setStyleSheet("color: #888; margin-top: 12px;")
+        self._status.setStyleSheet("color: #6B7280; margin-top: 14px;")
 
         layout.addStretch()
         layout.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
